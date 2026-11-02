@@ -43,6 +43,19 @@ const APP_NAMES = {
   bitwarden: 'Bitwarden',
   keepass: 'KeePass',
   lastpass: 'LastPass',
+  electron: 'DSH',
+  msedge: 'Edge',
+  chrome: 'Chrome',
+  firefox: 'Firefox',
+  explorer: '文件管理器',
+  code: 'VS Code',
+  notepad: '记事本',
+  qqmusic: 'QQ音乐',
+  steamwebhelper: 'Steam',
+  steam: 'Steam',
+  spotify: 'Spotify',
+  vlc: 'VLC',
+  potplayermini64: 'PotPlayer',
 }
 
 function isPrivate(processName, title) {
@@ -377,7 +390,7 @@ function apply(ctx) {
         const hidden = isPrivate(fg.process, fg.title)
         appendSample({
           ts: Date.now(),
-          app: hidden ? friendlyName(fg.process) : fg.process || '',
+          app: friendlyName(fg.process || ''),
           title: hidden ? '' : fg.title || '',
           hidden,
           idle: (data.idleSec || 0) >= IDLE_AFTER_SECONDS,
