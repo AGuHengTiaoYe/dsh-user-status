@@ -263,6 +263,7 @@ window.__ModuleLoader__.load({
 
       const clock = (date) => `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
       const apps = Array.isArray(history?.apps) ? history.apps : []
+      const hours = Array.isArray(history?.hours) ? history.hours : []
 
       return h(
         'div',
@@ -294,8 +295,8 @@ window.__ModuleLoader__.load({
             },
           },
             h('option', { value: 'off' }, '不读'),
-            h('option', { value: 'summary' }, '只读摘要'),
-            h('option', { value: 'full' }, '读完整明细'),
+            h('option', { value: 'summary' }, '总时长'),
+            h('option', { value: 'full' }, '按小时'),
           ),
           h('span', { style: { color: MUTED, fontSize: 11 } },
             historyModeDraft === 'off'
@@ -320,28 +321,41 @@ window.__ModuleLoader__.load({
         }, saved ? '已保存' : '保存'),
         h('div', { style: { marginTop: 18 } },
           h('div', { style: { fontWeight: 600, marginBottom: 8 } }, `最近 ${history?.days ?? settings?.historyDays ?? 3} 天`),
-          apps.length > 0
-            ? apps.map((item, index) => {
-                const from = new Date(item.firstTs)
-                const to = new Date(item.lastTs)
-                const duration = item.minutes >= 60
-                  ? `${Math.floor(item.minutes / 60)} 小时${item.minutes % 60 ? ` ${item.minutes % 60} 分` : ''}`
-                  : `${item.minutes} 分钟`
-                return h('div', {
-                  key: index,
-                  style: {
-                    display: 'flex',
-                    alignItems: 'baseline',
-                    gap: 8,
-                    padding: '5px 0',
-                    borderBottom: '1px solid ' + BORDER,
+          history?.mode === 'full'
+            ? hours.length > 0
+              ? hours.slice(0, 24).map((bucket, index) => h('div', { key: index, style: { marginBottom: 8 } },
+                  h('div', { style: { fontSize: 12, color: MUTED, marginBottom: 2 } }, bucket.hour),
+                  bucket.apps.map((entry, i) => h('div', {
+                    key: i,
+                    style: { display: 'flex', gap: 8, padding: '1px 0 1px 10px', fontSize: 12 },
                   },
-                },
-                  h('span', { style: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.app),
-                  h('span', { style: { flex: '0 0 auto', color: MUTED, fontSize: 12 } }, `${duration} · ${clock(from)}-${clock(to)}`),
-                )
-              })
-            : h('div', { style: { color: MUTED, fontSize: 12 } }, '还没有记录，运行一会儿就有了。'),
+                    h('span', { style: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, entry.app),
+                    h('span', { style: { flex: '0 0 auto', color: MUTED } }, `${entry.minutes} 分钟`),
+                  )),
+                ))
+              : h('div', { style: { color: MUTED, fontSize: 12 } }, '还没有记录，运行一会儿就有了。')
+            : apps.length > 0
+              ? apps.map((item, index) => {
+                  const from = new Date(item.firstTs)
+                  const to = new Date(item.lastTs)
+                  const duration = item.minutes >= 60
+                    ? `${Math.floor(item.minutes / 60)} 小时${item.minutes % 60 ? ` ${item.minutes % 60} 分` : ''}`
+                    : `${item.minutes} 分钟`
+                  return h('div', {
+                    key: index,
+                    style: {
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: 8,
+                      padding: '5px 0',
+                      borderBottom: '1px solid ' + BORDER,
+                    },
+                  },
+                    h('span', { style: { flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.app),
+                    h('span', { style: { flex: '0 0 auto', color: MUTED, fontSize: 12 } }, `${duration} · ${clock(from)}-${clock(to)}`),
+                  )
+                })
+              : h('div', { style: { color: MUTED, fontSize: 12 } }, '还没有记录，运行一会儿就有了。'),
         ),
       )
     }

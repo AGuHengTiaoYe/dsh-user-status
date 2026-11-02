@@ -148,6 +148,7 @@ function aggregateHistory(samples, now) {
   for (let i = 0; i < samples.length; i += 1) {
     const sample = samples[i]
     if (!sample || typeof sample.ts !== 'number') continue
+    if (sample.idle) continue
     const next = samples[i + 1]
     const start = sample.ts
     const end = Math.min(next && typeof next.ts === 'number' ? next.ts : now, now)
@@ -189,6 +190,7 @@ function aggregateByDay(samples, now) {
   for (let i = 0; i < samples.length; i += 1) {
     const sample = samples[i]
     if (!sample || typeof sample.ts !== 'number') continue
+    if (sample.idle) continue
     const next = samples[i + 1]
     const start = sample.ts
     const end = Math.min(next && typeof next.ts === 'number' ? next.ts : now, now)
@@ -219,6 +221,51 @@ function aggregateByDay(samples, now) {
         .map(([appName, value]) => `${appName} ${formatMinutes(Math.round(value.ms / 60000))}`)
       return `${day}：${parts.join('、')}`
     })
+}
+
+function startOfNextHour(ts) {
+  const date = new Date(ts)
+  date.setMinutes(0, 0, 0)
+  date.setHours(date.getHours() + 1)
+  return date.getTime()
+}
+
+function aggregateByHour(samples, now) {
+  const buckets = new Map()
+  for (let i = 0; i < samples.length; i += 1) {
+    const sample = samples[i]
+    if (!sample || typeof sample.ts !== 'number') continue
+    if (sample.idle) continue
+    const next = samples[i + 1]
+    const start = sample.ts
+    const end = Math.min(next && typeof next.ts === 'number' ? next.ts : now, now)
+    if (end <= start) continue
+    const appKey = sample.app || '未知'
+    let cursor = start
+    while (cursor < end) {
+      const boundary = Math.min(startOfNextHour(cursor), end)
+      const duration = boundary - cursor
+      if (duration >= 60000) {
+        const key = `${dateKey(cursor)} ${String(new Date(cursor).getHours()).padStart(2, '0')}`
+        let bucket = buckets.get(key)
+        if (!bucket) {
+          bucket = new Map()
+          buckets.set(key, bucket)
+        }
+        bucket.set(appKey, (bucket.get(appKey) || 0) + duration)
+      }
+      cursor = boundary
+    }
+  }
+  return [...buckets.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+    .map(([hour, apps]) => ({
+      hour,
+      apps: [...apps.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([appName, ms]) => ({ app: appName, minutes: Math.round(ms / 60000) }))
+        .filter((entry) => entry.minutes > 0),
+    }))
 }
 
 function buildPayload(data) {  const fg = data?.foreground || {}
@@ -270,14 +317,17 @@ function describeForPrompt(data) {
     const cutoff = Date.now() - settings.historyDays * 86400000
     const samples = readHistory().samples.filter((entry) => typeof entry?.ts === 'number' && entry.ts >= cutoff)
     if (settings.historyMode === 'summary') {
-      const apps = aggregateHistory(samples, Date.now()).slice(0, 5)
+      const apps = aggregateHistory(samples, Date.now())
       if (apps.length > 0) {
         const parts = apps.map((entry) => `${entry.app} ${formatMinutes(entry.minutes)}`)
-        summary = `（最近 ${settings.historyDays} 天常用：${parts.join('、')}）`
+        summary = `（最近 ${settings.historyDays} 天总时长：${parts.join('、')}）`
       }
     } else {
-      const lines = aggregateByDay(samples, Date.now())
-      if (lines.length > 0) summary = `（最近 ${settings.historyDays} 天记录：\n${lines.join('\n')}）`
+      const hours = aggregateByHour(samples, Date.now()).slice(0, 48)
+      if (hours.length > 0) {
+        const lines = hours.map((bucket) => `  ${bucket.hour}：${bucket.apps.slice(0, 6).map((entry) => `${entry.app} ${formatMinutes(entry.minutes)}`).join('、')}`)
+        summary = `（最近 ${settings.historyDays} 天按小时：\n${lines.join('\n')}）`
+      }
     }
   }
 
@@ -362,15 +412,18 @@ function apply(ctx) {
       kind: 'exact',
       path: '/user-status-history.json',
       handler: (_req, res) => {
-        const { historyDays } = readSettings()
+        const { historyDays, historyMode } = readSettings()
         const cutoff = Date.now() - historyDays * 86400000
         const samples = readHistory().samples
           .filter((entry) => typeof entry?.ts === 'number' && entry.ts >= cutoff)
+        const payload = historyMode === 'full'
+          ? { days: historyDays, mode: 'full', hours: aggregateByHour(samples, Date.now()).slice(0, 48) }
+          : { days: historyDays, mode: 'summary', apps: aggregateHistory(samples, Date.now()) }
         res.writeHead(200, {
           'content-type': 'application/json; charset=utf-8',
           'cache-control': 'no-store',
         })
-        res.end(JSON.stringify({ days: historyDays, apps: aggregateHistory(samples, Date.now()) }))
+        res.end(JSON.stringify(payload))
       },
     }))
     return () => {
