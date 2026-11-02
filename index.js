@@ -1,6 +1,6 @@
 /**
  * 把用户此刻在电脑上做什么（前台窗口、空闲时长、QQ音乐在放的歌）注入给模型，
- * 通过 HTTP 暴露给侧栏小组件，并可按设置的间隔在挂机时叫醒模型。
+ * 通过 HTTP 暴露给侧栏小组件，记录最近几天的状态，并可按设置的间隔在挂机时叫醒模型。
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -13,10 +13,13 @@ const inject = ['subprocess', 'systemPrompt', 'tools', 'webServer', 'agents']
 
 const STATUS_FILE = join(tmpdir(), 'dsh-user-status.json')
 const SETTINGS_FILE = join(tmpdir(), 'dsh-user-status-settings.json')
+const HISTORY_FILE = join(tmpdir(), 'dsh-user-status-history.json')
 const COLLECTOR_SCRIPT = fileURLToPath(new URL('./collector.ps1', import.meta.url))
 const POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
 const STALE_SECONDS = 20
 const IDLE_AFTER_SECONDS = 300
+const DEFAULT_HISTORY_DAYS = 3
+const MAX_HISTORY_SAMPLES = 3000
 
 // 这些程序在前台时，窗口标题一律不报，只说应用名。
 const PRIVATE_PROCESS = /^(qq|tim|wechat|weixin|wechatappex|telegram|discord|feishu|lark|dingtalk|slack|outlook|foxmail|1password|bitwarden|keepass|lastpass|credential)/i
@@ -78,12 +81,23 @@ function clampWakeMinutes(value) {
   return Math.max(5, Math.min(1440, Math.round(n)))
 }
 
+function clampHistoryDays(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return DEFAULT_HISTORY_DAYS
+  return Math.max(1, Math.min(30, Math.round(n)))
+}
+
 function readSettings() {
   try {
     const raw = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
-    return { wakeMinutes: clampWakeMinutes(raw?.wakeMinutes) }
+    const rawMode = raw?.historyMode
+    return {
+      wakeMinutes: clampWakeMinutes(raw?.wakeMinutes),
+      historyDays: clampHistoryDays(raw?.historyDays ?? DEFAULT_HISTORY_DAYS),
+      historyMode: rawMode === 'full' ? 'full' : rawMode === 'summary' ? 'summary' : 'off',
+    }
   } catch {
-    return { wakeMinutes: 0 }
+    return { wakeMinutes: 0, historyDays: DEFAULT_HISTORY_DAYS, historyMode: 'off' }
   }
 }
 
@@ -91,10 +105,121 @@ function writeSettings(settings) {
   writeFileSync(SETTINGS_FILE, JSON.stringify(settings), 'utf8')
 }
 
-function buildPayload(data) {
-  const fg = data?.foreground || {}
+function readHistory() {
+  try {
+    const raw = JSON.parse(readFileSync(HISTORY_FILE, 'utf8'))
+    return { samples: Array.isArray(raw?.samples) ? raw.samples : [] }
+  } catch {
+    return { samples: [] }
+  }
+}
+
+function writeHistory(history) {
+  writeFileSync(HISTORY_FILE, JSON.stringify(history), 'utf8')
+}
+
+function appendSample(sample) {
+  const { historyDays } = readSettings()
+  const cutoff = Date.now() - historyDays * 86400000
+  const history = readHistory()
+  const samples = history.samples.filter((entry) => typeof entry?.ts === 'number' && entry.ts >= cutoff)
+  const last = samples[samples.length - 1]
+  if (
+    last
+    && last.app === sample.app
+    && last.title === sample.title
+    && last.music === sample.music
+    && last.hidden === sample.hidden
+    && last.idle === sample.idle
+  ) {
+    return
+  }
+  samples.push(sample)
+  writeHistory({ samples: samples.slice(-MAX_HISTORY_SAMPLES) })
+}
+
+function aggregateHistory(samples, now) {
+  const byApp = new Map()
+  for (let i = 0; i < samples.length; i += 1) {
+    const sample = samples[i]
+    if (!sample || typeof sample.ts !== 'number') continue
+    const next = samples[i + 1]
+    const start = sample.ts
+    const end = Math.min(next && typeof next.ts === 'number' ? next.ts : now, now)
+    const duration = Math.max(0, end - start)
+    const key = sample.app || '未知'
+    let entry = byApp.get(key)
+    if (!entry) {
+      entry = { app: key, ms: 0, firstTs: start, lastTs: end }
+      byApp.set(key, entry)
+    }
+    entry.ms += duration
+    if (start < entry.firstTs) entry.firstTs = start
+    if (end > entry.lastTs) entry.lastTs = end
+  }
+  return [...byApp.values()]
+    .map((entry) => ({
+      app: entry.app,
+      minutes: Math.round(entry.ms / 60000),
+      firstTs: entry.firstTs,
+      lastTs: entry.lastTs,
+    }))
+    .filter((entry) => entry.minutes > 0)
+    .sort((a, b) => b.minutes - a.minutes)
+}
+
+function formatMinutes(minutes) {
+  return minutes >= 60
+    ? `${Math.floor(minutes / 60)}h${minutes % 60 ? ` ${minutes % 60}m` : ''}`
+    : `${minutes}m`
+}
+
+function dateKey(ts) {
+  const date = new Date(ts)
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+}
+
+function aggregateByDay(samples, now) {
+  const byDay = new Map()
+  for (let i = 0; i < samples.length; i += 1) {
+    const sample = samples[i]
+    if (!sample || typeof sample.ts !== 'number') continue
+    const next = samples[i + 1]
+    const start = sample.ts
+    const end = Math.min(next && typeof next.ts === 'number' ? next.ts : now, now)
+    const duration = Math.max(0, end - start)
+    if (duration < 60000) continue
+    const key = dateKey(start)
+    let apps = byDay.get(key)
+    if (!apps) {
+      apps = new Map()
+      byDay.set(key, apps)
+    }
+    const appKey = sample.app || '未知'
+    let entry = apps.get(appKey)
+    if (!entry) {
+      entry = { ms: 0, first: start, last: end }
+      apps.set(appKey, entry)
+    }
+    entry.ms += duration
+    if (start < entry.first) entry.first = start
+    if (end > entry.last) entry.last = end
+  }
+  return [...byDay.entries()]
+    .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+    .map(([day, apps]) => {
+      const parts = [...apps.entries()]
+        .sort((a, b) => b[1].ms - a[1].ms)
+        .slice(0, 6)
+        .map(([appName, value]) => `${appName} ${formatMinutes(Math.round(value.ms / 60000))}`)
+      return `${day}：${parts.join('、')}`
+    })
+}
+
+function buildPayload(data) {  const fg = data?.foreground || {}
   const hidden = isPrivate(fg.process, fg.title)
   const stale = ageSeconds(data) > STALE_SECONDS
+  const settings = readSettings()
   return {
     ok: Boolean(data) && !stale,
     stale,
@@ -107,7 +232,9 @@ function buildPayload(data) {
     },
     idleSeconds: typeof data?.idleSec === 'number' ? data.idleSec : -1,
     music: typeof data?.music?.title === 'string' ? data.music.title.trim() : '',
-    wakeMinutes: readSettings().wakeMinutes,
+    wakeMinutes: settings.wakeMinutes,
+    historyDays: settings.historyDays,
+    historyMode: settings.historyMode,
   }
 }
 
@@ -133,7 +260,24 @@ function describeForPrompt(data) {
   }
   if (music) bits.push(`QQ音乐在播「${music}」`)
 
-  return `用户当前状态：${bits.join('；')}。`
+  let summary = ''
+  const settings = readSettings()
+  if (settings.historyMode !== 'off') {
+    const cutoff = Date.now() - settings.historyDays * 86400000
+    const samples = readHistory().samples.filter((entry) => typeof entry?.ts === 'number' && entry.ts >= cutoff)
+    if (settings.historyMode === 'summary') {
+      const apps = aggregateHistory(samples, Date.now()).slice(0, 5)
+      if (apps.length > 0) {
+        const parts = apps.map((entry) => `${entry.app} ${formatMinutes(entry.minutes)}`)
+        summary = `（最近 ${settings.historyDays} 天常用：${parts.join('、')}）`
+      }
+    } else {
+      const lines = aggregateByDay(samples, Date.now())
+      if (lines.length > 0) summary = `（最近 ${settings.historyDays} 天记录：\n${lines.join('\n')}）`
+    }
+  }
+
+  return `用户当前状态：${bits.join('；')}。${summary}`
 }
 
 function wakeMessage(data) {
@@ -189,7 +333,8 @@ function apply(ctx) {
   })
 
   ctx.effect(() => {
-    const getRoute = ctx.webServer.register({
+    const routes = []
+    routes.push(ctx.webServer.register({
       kind: 'exact',
       path: '/user-status.json',
       handler: (_req, res) => {
@@ -205,8 +350,8 @@ function apply(ctx) {
         })
         res.end(JSON.stringify(payload))
       },
-    })
-    const settingsRoute = ctx.webServer.register({
+    }))
+    routes.push(ctx.webServer.register({
       kind: 'exact',
       path: '/user-status-settings.json',
       handler: async (req, res) => {
@@ -215,10 +360,14 @@ function apply(ctx) {
           try {
             for await (const chunk of req) body += chunk
           } catch {}
-          let next = { wakeMinutes: 0 }
+          let next = readSettings()
           try {
             const parsed = JSON.parse(body || '{}')
-            next = { wakeMinutes: clampWakeMinutes(parsed?.wakeMinutes) }
+            next = {
+              wakeMinutes: clampWakeMinutes(parsed?.wakeMinutes ?? next.wakeMinutes),
+              historyDays: clampHistoryDays(parsed?.historyDays ?? next.historyDays),
+              historyMode: parsed?.historyMode === 'full' ? 'full' : parsed?.historyMode === 'summary' ? 'summary' : 'off',
+            }
           } catch {}
           try { writeSettings(next) } catch (error) {
             res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
@@ -232,10 +381,26 @@ function apply(ctx) {
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         res.end(JSON.stringify(readSettings()))
       },
-    })
+    }))
+    routes.push(ctx.webServer.register({
+      kind: 'exact',
+      path: '/user-status-history.json',
+      handler: (_req, res) => {
+        const { historyDays } = readSettings()
+        const cutoff = Date.now() - historyDays * 86400000
+        const samples = readHistory().samples
+          .filter((entry) => typeof entry?.ts === 'number' && entry.ts >= cutoff)
+        res.writeHead(200, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify({ days: historyDays, apps: aggregateHistory(samples, Date.now()) }))
+      },
+    }))
     return () => {
-      try { getRoute() } catch {}
-      try { settingsRoute() } catch {}
+      for (const dispose of routes) {
+        try { dispose() } catch {}
+      }
     }
   })
 
@@ -243,10 +408,22 @@ function apply(ctx) {
   ctx.effect(() => {
     const timer = setInterval(() => {
       try {
-        const { wakeMinutes } = readSettings()
-        if (wakeMinutes <= 0) return
         const data = readStatus()
         if (!data || ageSeconds(data) > STALE_SECONDS) return
+
+        const fg = data.foreground || {}
+        const hidden = isPrivate(fg.process, fg.title)
+        appendSample({
+          ts: Date.now(),
+          app: hidden ? friendlyName(fg.process) : fg.process || '',
+          title: hidden ? '' : fg.title || '',
+          hidden,
+          idle: (data.idleSec || 0) >= IDLE_AFTER_SECONDS,
+          music: typeof data.music?.title === 'string' ? data.music.title.trim() : '',
+        })
+
+        const { wakeMinutes } = readSettings()
+        if (wakeMinutes <= 0) return
         const idle = typeof data.idleSec === 'number' ? data.idleSec : 0
         if (idle < IDLE_AFTER_SECONDS) {
           lastWakeAt = 0

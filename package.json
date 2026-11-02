@@ -1,6 +1,6 @@
 {
   "name": "dsh-user-status",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
   "description": "把当前窗口、空闲时长和 QQ音乐播放的歌告诉大肥鱼，并在侧栏显示",
