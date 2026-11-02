@@ -1,0 +1,3 @@
+- insert:
+    - id: user-status
+      name: 'dsh-user-status'
