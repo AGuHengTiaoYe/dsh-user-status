@@ -212,7 +212,6 @@ window.__ModuleLoader__.load({
 
     function SettingsPage() {
       const [settings, setSettings] = useState(null)
-      const [wakeDraft, setWakeDraft] = useState('')
       const [historyDraft, setHistoryDraft] = useState('')
       const [historyModeDraft, setHistoryModeDraft] = useState('off')
       const [history, setHistory] = useState(null)
@@ -223,7 +222,6 @@ window.__ModuleLoader__.load({
           .then((response) => response.json())
           .then((value) => {
             setSettings(value)
-            if (typeof value?.wakeMinutes === 'number') setWakeDraft(String(value.wakeMinutes))
             if (typeof value?.historyDays === 'number') setHistoryDraft(String(value.historyDays))
             setHistoryModeDraft(value?.historyMode === 'full' ? 'full' : value?.historyMode === 'summary' ? 'summary' : 'off')
           })
@@ -248,7 +246,6 @@ window.__ModuleLoader__.load({
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            wakeMinutes: Number(wakeDraft) || 0,
             historyDays: Number(historyDraft) || 3,
             historyMode: historyModeDraft,
           }),
@@ -256,7 +253,6 @@ window.__ModuleLoader__.load({
           .then((response) => response.json())
           .then((value) => {
             setSettings(value)
-            setWakeDraft(String(value?.wakeMinutes ?? 0))
             setHistoryDraft(String(value?.historyDays ?? 3))
             setHistoryModeDraft(value?.historyMode === 'full' ? 'full' : value?.historyMode === 'summary' ? 'summary' : 'off')
             setSaved(true)
@@ -274,15 +270,6 @@ window.__ModuleLoader__.load({
         h('div', { style: { fontWeight: 600, fontSize: 15, marginBottom: 4 } }, '用户状态'),
         h('div', { style: { color: MUTED, fontSize: 12, marginBottom: 16, lineHeight: 1.6 } },
           '侧栏底部的小圆点显示你现在在做什么。记录只保存在本机，不会进入对话上下文。'),
-        h(SettingRow, {
-          label: '叫醒间隔',
-          unit: '分钟',
-          min: 0,
-          max: 1440,
-          value: wakeDraft,
-          onChange: setWakeDraft,
-          hint: '0 = 关闭；挂机满 5 分钟后每隔这么久提醒一次',
-        }),
         h(SettingRow, {
           label: '记录天数',
           unit: '天',

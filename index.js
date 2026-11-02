@@ -1,15 +1,14 @@
 /**
  * 把用户此刻在电脑上做什么（前台窗口、空闲时长、QQ音乐在放的歌）注入给模型，
- * 通过 HTTP 暴露给侧栏小组件，记录最近几天的状态，并可按设置的间隔在挂机时叫醒模型。
+ * 通过 HTTP 暴露给侧栏小组件，并记录最近几天的应用使用情况。
  */
 import { readFileSync, writeFileSync } from 'node:fs'
-import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const name = 'user-status'
-const inject = ['subprocess', 'systemPrompt', 'tools', 'webServer', 'agents']
+const inject = ['subprocess', 'systemPrompt', 'tools', 'webServer']
 
 const STATUS_FILE = join(tmpdir(), 'dsh-user-status.json')
 const SETTINGS_FILE = join(tmpdir(), 'dsh-user-status-settings.json')
@@ -75,12 +74,6 @@ function ageSeconds(data) {
     : Number.POSITIVE_INFINITY
 }
 
-function clampWakeMinutes(value) {
-  const n = Number(value)
-  if (!Number.isFinite(n) || n <= 0) return 0
-  return Math.max(5, Math.min(1440, Math.round(n)))
-}
-
 function clampHistoryDays(value) {
   const n = Number(value)
   if (!Number.isFinite(n)) return DEFAULT_HISTORY_DAYS
@@ -92,12 +85,11 @@ function readSettings() {
     const raw = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'))
     const rawMode = raw?.historyMode
     return {
-      wakeMinutes: clampWakeMinutes(raw?.wakeMinutes),
       historyDays: clampHistoryDays(raw?.historyDays ?? DEFAULT_HISTORY_DAYS),
       historyMode: rawMode === 'full' ? 'full' : rawMode === 'summary' ? 'summary' : 'off',
     }
   } catch {
-    return { wakeMinutes: 0, historyDays: DEFAULT_HISTORY_DAYS, historyMode: 'off' }
+    return { historyDays: DEFAULT_HISTORY_DAYS, historyMode: 'off' }
   }
 }
 
@@ -232,7 +224,6 @@ function buildPayload(data) {  const fg = data?.foreground || {}
     },
     idleSeconds: typeof data?.idleSec === 'number' ? data.idleSec : -1,
     music: typeof data?.music?.title === 'string' ? data.music.title.trim() : '',
-    wakeMinutes: settings.wakeMinutes,
     historyDays: settings.historyDays,
     historyMode: settings.historyMode,
   }
@@ -278,33 +269,6 @@ function describeForPrompt(data) {
   }
 
   return `用户当前状态：${bits.join('；')}。${summary}`
-}
-
-function wakeMessage(data) {
-  const fg = data.foreground || {}
-  const music = typeof data.music?.title === 'string' ? data.music.title.trim() : ''
-  const idleMin = Math.max(1, Math.round((data.idleSec || 0) / 60))
-  let where = ''
-  if (fg.process) {
-    if (isPrivate(fg.process, fg.title)) where = `前台上是「${friendlyName(fg.process)}」`
-    else if (isDshWindow(fg.process, fg.title)) where = '停留在 DSH 这边'
-    else if (fg.title) where = `前台是「${fg.title}」`
-  }
-  const bits = [`（挂机提醒）用户已经 ${idleMin} 分钟没有操作了。`]
-  if (where) bits.push(`${where}。`)
-  if (music) bits.push(`QQ音乐在播「${music}」。`)
-  bits.push('如果你想关心一句，就自然地说；不想说或者觉得打扰，也可以什么都不做。')
-  const text = bits.join('')
-  return {
-    id: randomUUID(),
-    role: 'user',
-    content: [{ type: 'text', text }],
-    source: {
-      kind: 'user-status',
-      form: 'snapshot',
-      sections: [{ name: 'user-status', text }],
-    },
-  }
 }
 
 function apply(ctx) {
@@ -364,7 +328,6 @@ function apply(ctx) {
           try {
             const parsed = JSON.parse(body || '{}')
             next = {
-              wakeMinutes: clampWakeMinutes(parsed?.wakeMinutes ?? next.wakeMinutes),
               historyDays: clampHistoryDays(parsed?.historyDays ?? next.historyDays),
               historyMode: parsed?.historyMode === 'full' ? 'full' : parsed?.historyMode === 'summary' ? 'summary' : 'off',
             }
@@ -404,7 +367,6 @@ function apply(ctx) {
     }
   })
 
-  let lastWakeAt = 0
   ctx.effect(() => {
     const timer = setInterval(() => {
       try {
@@ -421,21 +383,6 @@ function apply(ctx) {
           idle: (data.idleSec || 0) >= IDLE_AFTER_SECONDS,
           music: typeof data.music?.title === 'string' ? data.music.title.trim() : '',
         })
-
-        const { wakeMinutes } = readSettings()
-        if (wakeMinutes <= 0) return
-        const idle = typeof data.idleSec === 'number' ? data.idleSec : 0
-        if (idle < IDLE_AFTER_SECONDS) {
-          lastWakeAt = 0
-          return
-        }
-        const now = Date.now()
-        if (lastWakeAt !== 0 && now - lastWakeAt < wakeMinutes * 60000) return
-        const agents = ctx.agents.list()
-        const target = agents.find((agent) => agent.status === 'idle')
-        if (!target) return
-        target.followup(wakeMessage(data))
-        lastWakeAt = now
       } catch {}
     }, 30000)
     return () => clearInterval(timer)
